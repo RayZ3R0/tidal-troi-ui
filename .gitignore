@@ -4,3 +4,4 @@ downloads/
 frontend/package-lock.json
 frontend/node_modules/
 tidal-ui-src-reference/
+backend\.env

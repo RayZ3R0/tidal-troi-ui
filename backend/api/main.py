@@ -10,6 +10,7 @@ from pathlib import Path
 import time
 import aiofiles
 import re
+import requests
 
 # Add parent directory to path
 sys.path.append(str(Path(__file__).parent.parent))
@@ -52,6 +53,13 @@ class TroiTrackResponse(BaseModel):
     tidal_id: Optional[int]
     tidal_exists: bool
     album: Optional[str]
+
+# Add request model at top with other models
+class DownloadTrackRequest(BaseModel):
+    track_id: int
+    artist: str
+    title: str
+    quality: str = "LOSSLESS"
 
 # Helper function to extract items from API response
 def extract_items(result, key: str) -> List:
@@ -394,11 +402,20 @@ async def get_stream_url(track_id: int, quality: str = "LOSSLESS"):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/download/track")
-async def download_track_server_side(background_tasks: BackgroundTasks, track_id: int, artist: str, title: str, quality: str = "LOSSLESS"):
-    """Download track to server-side downloads folder"""
+async def download_track_server_side(request: DownloadTrackRequest):
+    """Download track to server-side music directory"""
     try:
+        print(f"\n{'='*60}")
+        print(f"Download Request:")
+        print(f"  Track ID: {request.track_id}")
+        print(f"  Artist: {request.artist}")
+        print(f"  Title: {request.title}")
+        print(f"  Quality: {request.quality}")
+        print(f"{'='*60}\n")
+        
         # Get stream URL
-        track_data = tidal_client.get_track(track_id, quality)
+        print(f"[1/3] Getting stream URL...")
+        track_data = tidal_client.get_track(request.track_id, request.quality)
         if not track_data:
             raise HTTPException(status_code=404, detail="Track not found")
         
@@ -406,50 +423,84 @@ async def download_track_server_side(background_tasks: BackgroundTasks, track_id
         if not stream_url:
             raise HTTPException(status_code=404, detail="Stream URL not found")
         
+        print(f"✓ Stream URL: {stream_url[:60]}...")
+        
         # Sanitize filename
-        filename = f"{artist} - {title}.flac"
+        filename = f"{request.artist} - {request.title}.flac"
         filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
         filepath = DOWNLOAD_DIR / filename
         
+        print(f"\n[2/3] Target file: {filepath}")
+        
         # Check if already exists
         if filepath.exists():
+            print(f"⚠️  File already exists, skipping download")
             return {
                 "status": "exists",
                 "filename": filename,
-                "path": str(filepath)
+                "path": str(filepath),
+                "message": f"File already exists: {filename}"
             }
         
-        # Download in background
-        async def download_file():
-            try:
-                response = requests.get(stream_url, stream=True, timeout=30)
-                if response.status_code != 200:
-                    print(f"Failed to download {filename}: HTTP {response.status_code}")
-                    return
-                
-                with open(filepath, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                
-                print(f"✓ Downloaded: {filename} ({filepath.stat().st_size / 1024 / 1024:.2f} MB)")
-            except Exception as e:
-                print(f"✗ Download failed: {filename} - {e}")
-                if filepath.exists():
-                    filepath.unlink()
+        # Download synchronously (not in background) for better error handling
+        print(f"[3/3] Downloading...")
         
-        background_tasks.add_task(download_file)
+        response = requests.get(stream_url, stream=True, timeout=30)
+        
+        if response.status_code != 200:
+            error_msg = f"HTTP {response.status_code}"
+            print(f"✗ Download failed: {error_msg}")
+            raise HTTPException(status_code=response.status_code, detail=error_msg)
+        
+        # Download with progress
+        total_size = int(response.headers.get('content-length', 0))
+        downloaded = 0
+        
+        with open(filepath, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size > 0:
+                        progress = (downloaded / total_size) * 100
+                        print(f"  Progress: {progress:.1f}%", end='\r')
+        
+        file_size_mb = filepath.stat().st_size / 1024 / 1024
+        print(f"\n✓ Downloaded: {filename} ({file_size_mb:.2f} MB)")
+        print(f"  Location: {filepath}")
+        print(f"{'='*60}\n")
         
         return {
-            "status": "downloading",
+            "status": "completed",
             "filename": filename,
-            "path": str(filepath)
+            "path": str(filepath),
+            "size_mb": round(file_size_mb, 2),
+            "message": f"Successfully downloaded: {filename}"
         }
         
+    except HTTPException:
+        raise
+    except requests.exceptions.Timeout:
+        error_msg = "Download timed out after 30 seconds"
+        print(f"✗ {error_msg}")
+        raise HTTPException(status_code=504, detail=error_msg)
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Network error: {str(e)}"
+        print(f"✗ {error_msg}")
+        raise HTTPException(status_code=500, detail=error_msg)
     except Exception as e:
-        print(f"Error initiating download: {e}")
+        print(f"✗ Download error: {e}")
         import traceback
         traceback.print_exc()
+        
+        # Clean up partial file
+        if 'filepath' in locals() and filepath.exists():
+            try:
+                filepath.unlink()
+                print(f"  Cleaned up partial file: {filename}")
+            except Exception:
+                pass
+        
         raise HTTPException(status_code=500, detail=str(e))
 
 def extract_stream_url(track_data) -> Optional[str]:

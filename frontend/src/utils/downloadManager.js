@@ -1,8 +1,9 @@
 import { api } from "../api/client";
 import { useDownloadStore } from "../stores/downloadStore";
 
-// Add configuration option
-const DOWNLOAD_MODE = "client"; // or "server"
+// Configuration
+const DOWNLOAD_MODE = "server"; // "client" or "server"
+const API_BASE = "http://localhost:8001/api"; // Backend API base URL
 
 class DownloadManager {
   constructor() {
@@ -10,9 +11,6 @@ class DownloadManager {
     this.activeDownloads = new Map();
   }
 
-  /**
-   * Start processing the queue
-   */
   async start() {
     if (this.isProcessing) {
       console.log("Download manager already running");
@@ -26,15 +24,12 @@ class DownloadManager {
       const state = useDownloadStore.getState();
       const { queue, downloading, maxConcurrent } = state;
 
-      // Check if we can start more downloads
       if (downloading.length < maxConcurrent && queue.length > 0) {
         const track = queue[0];
         await this.downloadTrack(track);
       } else if (downloading.length === 0 && queue.length === 0) {
-        // Nothing to do
         await this.sleep(1000);
       } else {
-        // Wait for active downloads
         await this.sleep(500);
       }
     }
@@ -42,22 +37,14 @@ class DownloadManager {
     console.log("🛑 Download manager stopped");
   }
 
-  /**
-   * Stop processing the queue
-   */
   stop() {
     this.isProcessing = false;
-
-    // Cancel active downloads
     this.activeDownloads.forEach((controller) => {
       controller.abort();
     });
     this.activeDownloads.clear();
   }
 
-  /**
-   * Download a single track
-   */
   async downloadTrack(track) {
     if (DOWNLOAD_MODE === "server") {
       return this.downloadTrackServerSide(track);
@@ -67,7 +54,7 @@ class DownloadManager {
   }
 
   /**
-   * Download track server-side (saves to backend/downloads/)
+   * Download track server-side (saves to backend/downloads/ or custom path)
    */
   async downloadTrackServerSide(track) {
     const { startDownload, completeDownload, failDownload, quality } =
@@ -77,25 +64,56 @@ class DownloadManager {
 
     try {
       console.log(`⬇️ Downloading (server): ${track.artist} - ${track.title}`);
+      console.log(`  Track ID: ${track.tidal_id || track.id}`);
+      console.log(`  Quality: ${quality}`);
+
+      // Ensure we have the correct track ID
+      const trackId = track.tidal_id || track.id;
+      if (!trackId) {
+        throw new Error("Track ID is missing");
+      }
+
+      const requestBody = {
+        track_id: Number(trackId),
+        artist: String(track.artist || "Unknown Artist"),
+        title: String(track.title || "Unknown Title"),
+        quality: String(quality),
+      };
+
+      console.log("Request body:", JSON.stringify(requestBody, null, 2));
 
       const response = await fetch(`${API_BASE}/download/track`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          track_id: track.tidal_id,
-          artist: track.artist,
-          title: track.title,
-          quality,
-        }),
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(requestBody),
       });
 
+      console.log(`Response status: ${response.status} ${response.statusText}`);
+
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+        const errorText = await response.text();
+        console.error("Error response body:", errorText);
+
+        let errorData;
+        try {
+          errorData = JSON.parse(errorText);
+        } catch {
+          errorData = { detail: errorText || response.statusText };
+        }
+
+        throw new Error(errorData.detail || `HTTP ${response.status}`);
       }
 
       const result = await response.json();
+      console.log("Download result:", result);
+
       completeDownload(track.id, result.filename);
       console.log(`✓ Downloaded: ${result.filename}`);
+      if (result.path) {
+        console.log(`  Location: ${result.path}`);
+      }
     } catch (error) {
       console.error(`✗ Download failed: ${track.title}`, error);
       failDownload(track.id, error.message);
@@ -116,7 +134,6 @@ class DownloadManager {
       quality,
     } = useDownloadStore.getState();
 
-    // Move to downloading state
     startDownload(track.id);
 
     const controller = new AbortController();
@@ -125,7 +142,6 @@ class DownloadManager {
     try {
       console.log(`⬇️ Downloading: ${track.artist} - ${track.title}`);
 
-      // Get stream URL
       const streamData = await api.get(`/download/stream/${track.tidal_id}`, {
         quality,
       });
@@ -134,7 +150,6 @@ class DownloadManager {
         throw new Error("No stream URL returned");
       }
 
-      // Download the file
       const response = await fetch(streamData.stream_url, {
         signal: controller.signal,
       });
@@ -143,7 +158,6 @@ class DownloadManager {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
-      // Track progress
       const totalBytes = parseInt(
         response.headers.get("content-length") || "0"
       );
@@ -166,7 +180,6 @@ class DownloadManager {
         }
       }
 
-      // Create blob and trigger download
       const blob = new Blob(chunks, {
         type: response.headers.get("content-type") || "audio/flac",
       });
@@ -184,7 +197,6 @@ class DownloadManager {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
 
-      // Mark as complete
       completeDownload(track.id, filename);
       console.log(
         `✓ Downloaded: ${filename} (${(receivedBytes / 1024 / 1024).toFixed(
@@ -203,25 +215,17 @@ class DownloadManager {
       this.activeDownloads.delete(track.id);
     }
 
-    // Rate limit protection
     await this.sleep(1000);
   }
 
-  /**
-   * Sanitize filename
-   */
   sanitizeFilename(filename) {
     const invalid = /[<>:"/\\|?*]/g;
     return filename.replace(invalid, "_").trim();
   }
 
-  /**
-   * Sleep utility
-   */
   sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }
 
-// Singleton instance
 export const downloadManager = new DownloadManager();
