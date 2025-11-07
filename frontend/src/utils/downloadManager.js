@@ -3,7 +3,7 @@ import { useDownloadStore } from "../stores/downloadStore";
 
 // Configuration
 const DOWNLOAD_MODE = "server"; // "client" or "server"
-const API_BASE = "http://localhost:8001/api"; // Backend API base URL
+const API_BASE = window.location.origin + "/api"; // Backend API base URL
 
 class DownloadManager {
   constructor() {
