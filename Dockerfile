@@ -4,7 +4,8 @@ WORKDIR /app/frontend
 
 # Copy frontend files
 COPY frontend/package*.json ./
-RUN npm ci
+# Use npm install to properly resolve platform dependencies for Alpine Linux
+RUN npm install
 
 COPY frontend/ ./
 RUN npm run build
