@@ -7,7 +7,8 @@ pydantic==2.10.3
 pydantic-settings==2.6.1
 python-dotenv
 aiohttp==3.11.11
-mutagen==1.47.0
+mutagen==1.46.0
 lrclibapi==0.3.1
 passlib[bcrypt]==1.7.4
 python-jose[cryptography]==3.3.0
+troi==2025.8.6.3
