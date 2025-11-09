@@ -23,6 +23,11 @@ class ApiClient {
     return headers;
   }
 
+  getAuthHeaders() {
+    const authHeader = useAuthStore.getState().getAuthHeader();
+    return authHeader ? { Authorization: authHeader } : {};
+  }
+
   /**
    * Make GET request with auth
    */
@@ -140,6 +145,23 @@ class ApiClient {
   }
 
   /**
+   * Create Troi progress stream
+   */
+  createTroiProgressStream(progressId) {
+    const authHeader = useAuthStore.getState().getAuthHeader();
+    const url = new URL(
+      `${API_BASE}/troi/progress/${progressId}`,
+      window.location.origin
+    );
+
+    const eventSource = new EventSource(url.toString(), {
+      withCredentials: true,
+    });
+
+    return eventSource;
+  }
+
+  /**
    * Create Server-Sent Events stream for download progress
    */
   createProgressStream(trackId) {
@@ -149,7 +171,6 @@ class ApiClient {
       window.location.origin
     );
 
-    // Create EventSource with custom headers via fetch
     return new EventSource(url.toString(), {
       withCredentials: true,
     });
@@ -164,6 +185,10 @@ class ApiClient {
     // Handle different cover ID formats
     const cleanId = String(coverId).replace(/-/g, "/");
     return `https://resources.tidal.com/images/${cleanId}/${size}x${size}.jpg`;
+  }
+
+  get baseUrl() {
+    return window.location.origin;
   }
 }
 

@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 import json
 import aiohttp
 import os
+import unicodedata
 from dotenv import load_dotenv
 from mutagen.flac import FLAC, Picture
 from mutagen.mp4 import MP4, MP4Cover
@@ -24,7 +25,6 @@ from mutagen.id3 import ID3, APIC, ID3NoHeaderError
 from mutagen.easyid3 import EasyID3
 from lyrics_client import lyrics_client
 
-# Import auth
 from api.auth import require_auth
 
 load_dotenv()
@@ -60,6 +60,44 @@ def log_info(msg: str):
 
 def log_step(step: str, msg: str):
     print(f"{Colors.MAGENTA}[{step}]{Colors.RESET} {msg}")
+
+def fix_unicode(text: str) -> str:
+    if not text:
+        return text
+    
+    try:
+        if '\\u' in text:
+            text = text.encode('raw_unicode_escape').decode('unicode_escape')
+    except:
+        pass
+    
+    try:
+        text = unicodedata.normalize('NFC', text)
+    except:
+        pass
+    
+    return text
+
+def romanize_japanese(text: str) -> Optional[str]:
+    if not text:
+        return None
+    
+    has_japanese = any('\u3040' <= c <= '\u30ff' or '\u4e00' <= c <= '\u9fff' for c in text)
+    
+    if not has_japanese:
+        return None
+    
+    try:
+        import pykakasi
+        kakasi = pykakasi.kakasi()
+        result = kakasi.convert(text)
+        romanized = ' '.join([item['hepburn'] for item in result])
+        return romanized
+    except ImportError:
+        return None
+    except Exception as e:
+        log_warning(f"Romanization failed: {e}")
+        return None
 
 app = FastAPI(title="Troi Tidal Downloader API")
 
@@ -117,6 +155,7 @@ DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 print(f"Download directory: {DOWNLOAD_DIR}")
 
 active_downloads = {}
+troi_progress_queues = {}
 
 MP3_QUALITY_MAP = {
     "MP3_128": 128,
@@ -328,7 +367,6 @@ async def download_file_async(track_id: int, stream_url: str, filepath: Path, fi
             except Exception:
                 pass
 
-
 async def write_metadata_tags(filepath: Path, metadata: dict):
     try:
         with open(filepath, 'rb') as f:
@@ -357,7 +395,6 @@ async def write_metadata_tags(filepath: Path, metadata: dict):
         log_warning(f"Failed to write metadata: {e}")
         import traceback
         traceback.print_exc()
-
 
 async def write_flac_metadata(filepath: Path, metadata: dict):
     try:
@@ -415,7 +452,6 @@ async def write_flac_metadata(filepath: Path, metadata: dict):
     except Exception as e:
         log_warning(f"Failed to write FLAC metadata: {e}")
         raise
-
 
 async def write_m4a_metadata(filepath: Path, metadata: dict):
     try:
@@ -666,78 +702,150 @@ async def organize_file_by_metadata(temp_filepath: Path, metadata: dict) -> Path
 
 @app.get("/api")
 async def api_root():
-    """Public endpoint - no auth required"""
     return {"status": "ok", "message": "Troi Tidal Downloader API"}
 
 @app.get("/api/health")
 async def health_check():
-    """Public health check - no auth required"""
     return {"status": "healthy"}
 
-# Protected endpoints - all require authentication
 @app.post("/api/troi/generate")
 async def generate_troi_playlist(
     request: TroiGenerateRequest,
+    background_tasks: BackgroundTasks,
     username: str = Depends(require_auth)
 ):
+    import uuid
+    progress_id = str(uuid.uuid4())
+    
+    background_tasks.add_task(
+        troi_generate_with_progress,
+        request.username,
+        request.playlist_type,
+        progress_id
+    )
+    
+    return {"progress_id": progress_id}
+
+async def troi_generate_with_progress(username: str, playlist_type: str, progress_id: str):
+    queue = asyncio.Queue()
+    troi_progress_queues[progress_id] = queue
+    
     try:
-        log_info(f"Generating Troi playlist for {request.username}...")
-        tracks = TroiIntegration.generate_playlist(
-            request.username,
-            request.playlist_type
-        )
-        log_info(f"Generated {len(tracks)} tracks from Troi")
+        await queue.put({
+            "type": "info",
+            "message": f"Generating Troi playlist for {username}...",
+            "progress": 0,
+            "total": 0
+        })
+        
+        tracks = TroiIntegration.generate_playlist(username, playlist_type)
+        
+        for track in tracks:
+            track.title = fix_unicode(track.title)
+            track.artist = fix_unicode(track.artist)
+            if track.album:
+                track.album = fix_unicode(track.album)
+        
+        await queue.put({
+            "type": "info",
+            "message": f"Generated {len(tracks)} tracks from Troi",
+            "progress": 0,
+            "total": len(tracks)
+        })
         
         validated_tracks = []
         for i, track in enumerate(tracks, 1):
-            log_info(f"[{i}/{len(tracks)}] Validating: {track.artist} - {track.title}")
+            display_text = f"{track.artist} - {track.title}"
             
-            query = f"{track.artist} {track.title}"
-            result = tidal_client.search_tracks(query)
+            await queue.put({
+                "type": "validating",
+                "message": f"Validating: {display_text}",
+                "progress": i,
+                "total": len(tracks),
+                "current_track": {
+                    "artist": track.artist,
+                    "title": track.title
+                }
+            })
             
-            if result:
-                tidal_tracks = extract_items(result, 'tracks')
-                
-                if tidal_tracks and len(tidal_tracks) > 0:
-                    first_track = tidal_tracks[0]
-                    track.tidal_id = first_track.get('id')
-                    track.tidal_exists = True
-                    
-                    album_data = first_track.get('album', {})
-                    track.album = album_data.get('title') if isinstance(album_data, dict) else None
-                    
-                    log_success(f"Found on Tidal - ID: {track.tidal_id}")
-                else:
-                    log_error("Not found on Tidal")
-            else:
-                log_error("API returned None")
+            log_info(f"[{i}/{len(tracks)}] Validating: {display_text}")
             
-            validated_tracks.append(TroiTrackResponse(
-                title=track.title,
-                artist=track.artist,
-                mbid=track.mbid,
-                tidal_id=track.tidal_id,
-                tidal_exists=track.tidal_exists,
-                album=track.album
-            ))
+            await search_track_with_fallback(track.artist, track.title, track)
             
-            time.sleep(0.1)
+            validated_tracks.append({
+                "title": track.title,
+                "artist": track.artist,
+                "mbid": track.mbid,
+                "tidal_id": track.tidal_id,
+                "tidal_exists": track.tidal_exists,
+                "album": track.album
+            })
+            
+            await asyncio.sleep(0.1)
         
-        found_count = sum(1 for t in validated_tracks if t.tidal_exists)
+        found_count = sum(1 for t in validated_tracks if t.get("tidal_exists"))
+        
         log_info(f"Validation complete: {found_count}/{len(validated_tracks)} found on Tidal")
         
-        return {
+        await queue.put({
+            "type": "complete",
+            "message": f"Validation complete: {found_count}/{len(validated_tracks)} found on Tidal",
+            "progress": len(tracks),
+            "total": len(tracks),
             "tracks": validated_tracks,
-            "count": len(validated_tracks),
-            "found_on_tidal": found_count
-        }
+            "found_count": found_count
+        })
         
     except Exception as e:
-        log_error(f"Error generating playlist: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        log_error(f"Troi generation error: {str(e)}")
+        await queue.put({
+            "type": "error",
+            "message": str(e),
+            "progress": 0,
+            "total": 0
+        })
+    finally:
+        await queue.put(None)
 
+@app.get("/api/troi/progress/{progress_id}")
+async def troi_progress_stream(
+    progress_id: str,
+    username: str = Depends(require_auth)
+):
+    async def event_generator():
+        if progress_id not in troi_progress_queues:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Invalid progress ID'})}\n\n"
+            return
+        
+        queue = troi_progress_queues[progress_id]
+        
+        try:
+            while True:
+                try:
+                    message = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    
+                    if message is None:
+                        break
+                    
+                    yield f"data: {json.dumps(message, ensure_ascii=False)}\n\n"
+                    
+                except asyncio.TimeoutError:
+                    yield f"data: {json.dumps({'type': 'ping'})}\n\n"
+                    
+        finally:
+            if progress_id in troi_progress_queues:
+                del troi_progress_queues[progress_id]
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "Content-Type": "text/event-stream; charset=utf-8"
+        }
+    )
 @app.get("/api/search/tracks")
 async def search_tracks(q: str, username: str = Depends(require_auth)):
     try:
