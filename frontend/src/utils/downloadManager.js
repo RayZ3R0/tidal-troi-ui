@@ -10,6 +10,166 @@ class DownloadManager {
   constructor() {
     this.isProcessing = false;
     this.activeDownloads = new Map();
+    this.progressStreams = new Map();
+  }
+
+  async initialize() {
+    const { downloading } = useDownloadStore.getState();
+
+    for (const track of downloading) {
+      this.reconnectProgressStream(track);
+    }
+  }
+
+  reconnectProgressStream(track) {
+    const trackId = track.tidal_id || track.id;
+
+    if (this.progressStreams.has(trackId)) {
+      return;
+    }
+
+    const authHeader = useAuthStore.getState().getAuthHeader();
+    const headers = {};
+    if (authHeader) {
+      headers["Authorization"] = authHeader;
+    }
+
+    const sseUrl = `${API_BASE}/download/progress/${trackId}`;
+
+    let reconnectAttempts = 0;
+    const maxReconnectAttempts = 5;
+    const reconnectDelay = 2000;
+
+    const createAuthenticatedSSE = async () => {
+      try {
+        const response = await fetch(sseUrl, {
+          headers: headers,
+          credentials: "include",
+        });
+
+        if (response.status === 401) {
+          useAuthStore.getState().clearCredentials();
+          return null;
+        }
+
+        if (!response.ok) {
+          if (reconnectAttempts < maxReconnectAttempts) {
+            reconnectAttempts++;
+            console.log(
+              `Reconnecting progress stream for track ${trackId} (attempt ${reconnectAttempts}/${maxReconnectAttempts})...`
+            );
+            setTimeout(() => createAuthenticatedSSE(), reconnectDelay);
+          } else {
+            console.error(
+              `Failed to reconnect progress stream for track ${trackId} after ${maxReconnectAttempts} attempts`
+            );
+            this.progressStreams.delete(trackId);
+          }
+          return null;
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+
+        this.progressStreams.set(trackId, {
+          cancel: () => reader.cancel(),
+          reader: reader,
+        });
+
+        reconnectAttempts = 0;
+
+        const readStream = async () => {
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) {
+                console.log(`Stream ended for track ${trackId}`);
+                this.progressStreams.delete(trackId);
+                break;
+              }
+
+              const chunk = decoder.decode(value, { stream: true });
+              const lines = chunk.split("\n");
+
+              for (const line of lines) {
+                if (line.startsWith("data: ")) {
+                  const data = JSON.parse(line.substring(6));
+
+                  if (data.progress !== undefined) {
+                    useDownloadStore
+                      .getState()
+                      .updateProgress(track.id, data.progress);
+
+                    if (data.status === "completed" || data.progress >= 100) {
+                      useDownloadStore
+                        .getState()
+                        .completeDownload(track.id, track.title);
+                      this.progressStreams.delete(trackId);
+                      return;
+                    }
+                  }
+
+                  if (data.status === "not_found") {
+                    console.warn(
+                      `Download not found for track ${trackId}, removing from downloading`
+                    );
+                    const state = useDownloadStore.getState();
+                    const downloadingTrack = state.downloading.find(
+                      (t) => t.tidal_id === trackId
+                    );
+                    if (downloadingTrack) {
+                      state.failDownload(
+                        downloadingTrack.id,
+                        "Download not found on server"
+                      );
+                    }
+                    this.progressStreams.delete(trackId);
+                    return;
+                  }
+
+                  if (data.status === "failed") {
+                    useDownloadStore
+                      .getState()
+                      .failDownload(track.id, data.error || "Download failed");
+                    this.progressStreams.delete(trackId);
+                    return;
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            console.error(`Stream read error for track ${trackId}:`, error);
+            this.progressStreams.delete(trackId);
+
+            if (reconnectAttempts < maxReconnectAttempts) {
+              reconnectAttempts++;
+              console.log(
+                `Reconnecting progress stream (attempt ${reconnectAttempts}/${maxReconnectAttempts})...`
+              );
+              setTimeout(() => createAuthenticatedSSE(), reconnectDelay);
+            }
+          }
+        };
+
+        readStream();
+      } catch (error) {
+        console.error(
+          `Failed to create progress stream for track ${trackId}:`,
+          error
+        );
+        this.progressStreams.delete(trackId);
+
+        if (reconnectAttempts < maxReconnectAttempts) {
+          reconnectAttempts++;
+          console.log(
+            `Reconnecting progress stream (attempt ${reconnectAttempts}/${maxReconnectAttempts})...`
+          );
+          setTimeout(() => createAuthenticatedSSE(), reconnectDelay);
+        }
+      }
+    };
+
+    createAuthenticatedSSE();
   }
 
   async start() {
@@ -20,6 +180,8 @@ class DownloadManager {
 
     this.isProcessing = true;
     console.log("🎵 Download manager started");
+
+    await this.initialize();
 
     while (this.isProcessing) {
       const state = useDownloadStore.getState();
@@ -46,6 +208,13 @@ class DownloadManager {
       }
     });
     this.activeDownloads.clear();
+
+    this.progressStreams.forEach((stream) => {
+      if (stream.cancel) {
+        stream.cancel();
+      }
+    });
+    this.progressStreams.clear();
   }
 
   async downloadTrack(track) {
@@ -94,6 +263,10 @@ class DownloadManager {
 
         const sseUrl = `${API_BASE}/download/progress/${trackId}`;
 
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 5;
+        const reconnectDelay = 2000;
+
         const createAuthenticatedSSE = async () => {
           try {
             const response = await fetch(sseUrl, {
@@ -108,7 +281,18 @@ class DownloadManager {
             }
 
             if (!response.ok) {
-              reject(new Error(`HTTP ${response.status}`));
+              if (
+                reconnectAttempts < maxReconnectAttempts &&
+                !downloadCompleted
+              ) {
+                reconnectAttempts++;
+                console.log(
+                  `Reconnecting (attempt ${reconnectAttempts}/${maxReconnectAttempts})...`
+                );
+                setTimeout(() => createAuthenticatedSSE(), reconnectDelay);
+              } else {
+                reject(new Error(`HTTP ${response.status}`));
+              }
               return null;
             }
 
@@ -116,11 +300,25 @@ class DownloadManager {
             streamReader = reader;
             const decoder = new TextDecoder();
 
+            reconnectAttempts = 0;
+
             const readStream = async () => {
               try {
                 while (true) {
                   const { done, value } = await reader.read();
-                  if (done) break;
+                  if (done) {
+                    if (!downloadCompleted) {
+                      console.log("Stream ended, attempting reconnect...");
+                      if (reconnectAttempts < maxReconnectAttempts) {
+                        reconnectAttempts++;
+                        setTimeout(
+                          () => createAuthenticatedSSE(),
+                          reconnectDelay
+                        );
+                      }
+                    }
+                    break;
+                  }
 
                   const chunk = decoder.decode(value, { stream: true });
                   const lines = chunk.split("\n");
@@ -156,7 +354,9 @@ class DownloadManager {
 
                       if (data.status === "failed") {
                         console.error("  Download failed on server");
-                        reject(new Error("Download failed on server"));
+                        reject(
+                          new Error(data.error || "Download failed on server")
+                        );
                         return;
                       }
                     }
@@ -164,7 +364,16 @@ class DownloadManager {
                 }
               } catch (error) {
                 if (!downloadCompleted) {
-                  reject(error);
+                  console.error("Stream read error:", error);
+                  if (reconnectAttempts < maxReconnectAttempts) {
+                    reconnectAttempts++;
+                    console.log(
+                      `Reconnecting (attempt ${reconnectAttempts}/${maxReconnectAttempts})...`
+                    );
+                    setTimeout(() => createAuthenticatedSSE(), reconnectDelay);
+                  } else {
+                    reject(error);
+                  }
                 }
               }
             };
@@ -181,7 +390,18 @@ class DownloadManager {
 
             return { cancel: () => reader.cancel() };
           } catch (error) {
-            reject(error);
+            if (
+              !downloadCompleted &&
+              reconnectAttempts < maxReconnectAttempts
+            ) {
+              reconnectAttempts++;
+              console.log(
+                `Reconnecting (attempt ${reconnectAttempts}/${maxReconnectAttempts})...`
+              );
+              setTimeout(() => createAuthenticatedSSE(), reconnectDelay);
+            } else {
+              reject(error);
+            }
             return null;
           }
         };

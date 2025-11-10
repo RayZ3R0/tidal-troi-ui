@@ -1,26 +1,18 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-/**
- * Download queue store using Zustand with persistence
- */
 export const useDownloadStore = create(
   persist(
     (set, get) => ({
-      // Queue state
       queue: [],
       downloading: [],
       completed: [],
       failed: [],
-
-      // Settings (persisted)
       quality: "LOSSLESS",
       maxConcurrent: 3,
 
-      // Actions
       addToQueue: (tracks) =>
         set((state) => {
-          // Prevent duplicates - check all queues
           const existingIds = new Set([
             ...state.queue.map((t) => t.tidal_id),
             ...state.downloading.map((t) => t.tidal_id),
@@ -138,7 +130,6 @@ export const useDownloadStore = create(
 
       setQuality: (quality) => set({ quality }),
 
-      // Get statistics
       getStats: () => {
         const state = get();
         return {
@@ -155,8 +146,12 @@ export const useDownloadStore = create(
       },
     }),
     {
-      name: "troi-download-settings",
+      name: "troi-download-queue",
       partialize: (state) => ({
+        queue: state.queue,
+        downloading: state.downloading,
+        completed: state.completed,
+        failed: state.failed,
         quality: state.quality,
         maxConcurrent: state.maxConcurrent,
       }),

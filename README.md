@@ -1,5 +1,7 @@
 A full-stack web application for downloading high-quality music from Tidal with intelligent playlist generation via ListenBrainz/Troi integration. Features automatic metadata tagging, lyrics fetching, and organized file management.
 
+Heavy inspired from https://github.com/uimaxbai/tidal-ui and using https://github.com/sachinsenal0x64/hifi
+
 ## Features
 
 ### Core Functionality

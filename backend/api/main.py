@@ -27,6 +27,7 @@ from mutagen.easyid3 import EasyID3
 from lyrics_client import lyrics_client
 
 from api.auth import require_auth
+from download_state import download_state_manager
 
 load_dotenv()
 
@@ -336,6 +337,11 @@ async def search_track_with_fallback(artist: str, title: str, track_obj) -> bool
     log_error("Not found on Tidal")
     return False
 
+@app.on_event("startup")
+async def startup_event():
+    tidal_client.cleanup_old_status_cache()
+    download_state_manager._cleanup_old_entries()
+
 async def download_file_async(track_id: int, stream_url: str, filepath: Path, filename: str, metadata: dict = None):
     processed_path = filepath
     try:
@@ -344,6 +350,8 @@ async def download_file_async(track_id: int, stream_url: str, filepath: Path, fi
         if track_id not in active_downloads:
             active_downloads[track_id] = {'progress': 0, 'status': 'downloading'}
         
+        download_state_manager.set_downloading(track_id, 0, metadata)
+        
         async with aiohttp.ClientSession() as session:
             async with session.get(stream_url, timeout=aiohttp.ClientTimeout(total=300)) as response:
                 if response.status != 200:
@@ -351,7 +359,8 @@ async def download_file_async(track_id: int, stream_url: str, filepath: Path, fi
                     log_error(f"Download failed: {error_msg}")
                     if track_id in active_downloads:
                         active_downloads[track_id] = {'progress': 0, 'status': 'failed'}
-                        await asyncio.sleep(2)
+                        download_state_manager.set_failed(track_id, error_msg, metadata)
+                        await asyncio.sleep(5)
                         del active_downloads[track_id]
                     return
                 
@@ -370,6 +379,7 @@ async def download_file_async(track_id: int, stream_url: str, filepath: Path, fi
                                     'progress': progress,
                                     'status': 'downloading'
                                 }
+                                download_state_manager.update_progress(track_id, progress)
                                 print(f"  Progress: {progress}%", end='\r')
                             
                             await asyncio.sleep(0.01)
@@ -383,6 +393,7 @@ async def download_file_async(track_id: int, stream_url: str, filepath: Path, fi
                     'progress': 95,
                     'status': 'transcoding'
                 }
+                download_state_manager.update_progress(track_id, 95)
                 await transcode_to_mp3(filepath, mp3_path, bitrate)
                 processed_path = mp3_path
                 metadata['file_ext'] = '.mp3'
@@ -406,6 +417,7 @@ async def download_file_async(track_id: int, stream_url: str, filepath: Path, fi
             'progress': 100,
             'status': 'completed'
         }
+        download_state_manager.set_completed(track_id, final_path.name, metadata)
         
         file_size_mb = final_path.stat().st_size / 1024 / 1024
         display_name = final_path.name if final_path else filename
@@ -413,7 +425,7 @@ async def download_file_async(track_id: int, stream_url: str, filepath: Path, fi
         log_info(f"Location: {final_path}")
         print(f"{'='*60}\n")
         
-        await asyncio.sleep(2)
+        await asyncio.sleep(5)
         
         if track_id in active_downloads:
             del active_downloads[track_id]
@@ -425,7 +437,8 @@ async def download_file_async(track_id: int, stream_url: str, filepath: Path, fi
         
         if track_id in active_downloads:
             active_downloads[track_id] = {'progress': 0, 'status': 'failed'}
-            await asyncio.sleep(2)
+            download_state_manager.set_failed(track_id, str(e), metadata)
+            await asyncio.sleep(5)
             del active_downloads[track_id]
         
         if filepath.exists():
@@ -1296,6 +1309,14 @@ async def get_stream_url(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/download/state")
+async def get_download_states(username: str = Depends(require_auth)):
+    return {
+        "active": download_state_manager.get_all_active(),
+        "completed": download_state_manager.get_all_completed(),
+        "failed": download_state_manager.get_all_failed()
+    }
+
 @app.get("/api/download/progress/{track_id}")
 async def download_progress_stream(
     track_id: int,
@@ -1304,30 +1325,63 @@ async def download_progress_stream(
     async def event_generator():
         last_progress = -1
         no_data_count = 0
-        max_no_data = 10
+        max_no_data = 60
         
-        while True:
-            if track_id in active_downloads:
-                download_info = active_downloads[track_id]
-                progress = download_info.get('progress', 0)
-                status = download_info.get('status', 'downloading')
+        saved_state = download_state_manager.get_download_state(track_id)
+        if saved_state:
+            progress = saved_state.get('progress', 0)
+            status = saved_state['status']
+            yield f"data: {json.dumps({'progress': progress, 'track_id': track_id, 'status': status})}\n\n"
+            
+            if status == 'completed':
+                yield f"data: {json.dumps({'progress': 100, 'track_id': track_id, 'status': 'completed'})}\n\n"
+                return
+            elif status == 'failed':
+                error = saved_state.get('error', 'Download failed')
+                yield f"data: {json.dumps({'progress': 0, 'track_id': track_id, 'status': 'failed', 'error': error})}\n\n"
+                return
+        
+        try:
+            while True:
+                current_progress = -1
+                current_status = 'unknown'
                 
-                if progress != last_progress:
-                    yield f"data: {json.dumps({'progress': progress, 'track_id': track_id, 'status': status})}\n\n"
-                    last_progress = progress
-                    no_data_count = 0
+                if track_id in active_downloads:
+                    download_info = active_downloads[track_id]
+                    current_progress = download_info.get('progress', 0)
+                    current_status = download_info.get('status', 'downloading')
+                else:
+                    saved_state = download_state_manager.get_download_state(track_id)
+                    if saved_state:
+                        current_progress = saved_state.get('progress', 0)
+                        current_status = saved_state['status']
+                    else:
+                        no_data_count += 1
                 
-                if progress >= 100 or status == 'completed':
-                    yield f"data: {json.dumps({'progress': 100, 'track_id': track_id, 'status': 'completed'})}\n\n"
-                    break
-            else:
-                no_data_count += 1
+                if current_progress != last_progress or current_status != 'unknown':
+                    if current_status != 'unknown':
+                        yield f"data: {json.dumps({'progress': current_progress, 'track_id': track_id, 'status': current_status})}\n\n"
+                        last_progress = current_progress
+                        no_data_count = 0
+                    
+                    if current_progress >= 100 or current_status == 'completed':
+                        yield f"data: {json.dumps({'progress': 100, 'track_id': track_id, 'status': 'completed'})}\n\n"
+                        return
+                    
+                    if current_status == 'failed':
+                        yield f"data: {json.dumps({'progress': 0, 'track_id': track_id, 'status': 'failed'})}\n\n"
+                        return
                 
                 if no_data_count >= max_no_data:
                     yield f"data: {json.dumps({'progress': 0, 'track_id': track_id, 'status': 'not_found'})}\n\n"
-                    break
-            
-            await asyncio.sleep(0.5)
+                    return
+                
+                await asyncio.sleep(0.5)
+                
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log_error(f"Progress stream error for track {track_id}: {e}")
     
     return StreamingResponse(
         event_generator(),

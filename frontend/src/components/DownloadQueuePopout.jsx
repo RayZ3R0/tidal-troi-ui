@@ -10,6 +10,7 @@ export function DownloadQueuePopout() {
   const [showCompleted, setShowCompleted] = useState(false);
   const [showHoverTray, setShowHoverTray] = useState(false);
   const hoverTimeoutRef = useRef(null);
+  const initializedRef = useRef(false);
 
   const queue = useDownloadStore((state) => state.queue);
   const downloading = useDownloadStore((state) => state.downloading);
@@ -24,6 +25,14 @@ export function DownloadQueuePopout() {
   const totalActivity = totalInQueue + completed.length + failed.length;
   const currentDownload = downloading[0];
   const currentProgress = currentDownload?.progress || 0;
+
+  useEffect(() => {
+    if (!initializedRef.current && downloading.length > 0) {
+      initializedRef.current = true;
+      setIsRunning(true);
+      downloadManager.initialize();
+    }
+  }, [downloading.length]);
 
   const handleStart = async () => {
     setIsRunning(true);
@@ -51,7 +60,7 @@ export function DownloadQueuePopout() {
     setTimeout(() => {
       setIsOpen(false);
       setIsClosing(false);
-    }, 300); // Match animation duration
+    }, 300);
   };
 
   const handleMouseEnter = () => {
@@ -79,14 +88,12 @@ export function DownloadQueuePopout() {
 
   return (
     <>
-      {/* Floating Control Panel - Hidden when popout is open */}
       {!isOpen && (
         <div
           class="fixed bottom-6 right-6 z-40 flex items-center gap-3"
           onMouseEnter={handleMouseEnter}
           onMouseLeave={handleMouseLeave}
         >
-          {/* Hover Tray - Current Download Info */}
           {showHoverTray && currentDownload && (
             <div
               class="absolute right-0 bottom-20 bg-surface rounded-xl shadow-xl border border-border-light p-4 w-[320px] animate-slide-in-tray"
@@ -136,7 +143,6 @@ export function DownloadQueuePopout() {
             </div>
           )}
 
-          {/* Play/Pause Button */}
           {totalInQueue > 0 && (
             <button
               onClick={handleToggleDownloads}
@@ -163,12 +169,10 @@ export function DownloadQueuePopout() {
             </button>
           )}
 
-          {/* Main Queue Button with Progress Ring */}
           <button
             onClick={() => setIsOpen(true)}
             class="relative w-16 h-16 rounded-full bg-primary hover:bg-primary-dark text-white shadow-xl hover:shadow-2xl transition-all duration-200 flex items-center justify-center group"
           >
-            {/* Progress Ring */}
             {currentDownload && (
               <svg
                 class="absolute inset-0 w-full h-full -rotate-90"
@@ -199,7 +203,6 @@ export function DownloadQueuePopout() {
               </svg>
             )}
 
-            {/* Icon */}
             <div class="relative z-10">
               <svg
                 class="w-7 h-7"
@@ -224,16 +227,13 @@ export function DownloadQueuePopout() {
         </div>
       )}
 
-      {/* Popout Panel - Replaces button when open */}
       {isOpen && (
         <div class="fixed bottom-6 right-6 z-50">
-          {/* Popout Card */}
           <div
             class={`w-[540px] bg-surface rounded-2xl shadow-2xl border border-border-light max-h-[calc(100vh-10rem)] flex flex-col ${
               isClosing ? "animate-popout-close" : "animate-popout-open"
             }`}
           >
-            {/* Clickable Header */}
             <button
               onClick={handleClose}
               class="flex items-center justify-between p-5 border-b border-border-light flex-shrink-0 hover:bg-surface-alt transition-colors rounded-t-2xl group w-full text-left"
@@ -256,9 +256,7 @@ export function DownloadQueuePopout() {
               </div>
             </button>
 
-            {/* Content */}
             <div class="flex-1 overflow-y-auto p-5 space-y-4">
-              {/* Stats */}
               <div class="flex flex-wrap gap-3 text-xs text-text-muted p-3 bg-surface-alt rounded-lg border border-border-light">
                 <div class="flex items-center gap-1.5">
                   <div class="w-2 h-2 rounded-full bg-secondary"></div>
@@ -280,7 +278,6 @@ export function DownloadQueuePopout() {
                 )}
               </div>
 
-              {/* Control Button */}
               <div class="flex gap-2">
                 {!isRunning ? (
                   <button
@@ -318,7 +315,6 @@ export function DownloadQueuePopout() {
                 )}
               </div>
 
-              {/* Queued Tracks */}
               {queue.length > 0 && (
                 <div>
                   <h3 class="text-xs font-semibold text-text-muted mb-2 uppercase tracking-wide">
@@ -363,7 +359,6 @@ export function DownloadQueuePopout() {
                 </div>
               )}
 
-              {/* Downloading Tracks */}
               {downloading.length > 0 && (
                 <div>
                   <h3 class="text-xs font-semibold text-text-muted mb-2 uppercase tracking-wide">
@@ -400,7 +395,6 @@ export function DownloadQueuePopout() {
                 </div>
               )}
 
-              {/* Failed Tracks */}
               {failed.length > 0 && (
                 <div>
                   <div class="flex items-center justify-between mb-2">
@@ -458,7 +452,6 @@ export function DownloadQueuePopout() {
                 </div>
               )}
 
-              {/* Completed Tracks */}
               {completed.length > 0 && (
                 <div>
                   <button
@@ -548,7 +541,6 @@ export function DownloadQueuePopout() {
                 </div>
               )}
 
-              {/* Empty State */}
               {totalInQueue === 0 &&
                 completed.length === 0 &&
                 failed.length === 0 && (
