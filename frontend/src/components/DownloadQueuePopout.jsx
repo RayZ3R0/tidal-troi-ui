@@ -10,7 +10,6 @@ export function DownloadQueuePopout() {
   const [showCompleted, setShowCompleted] = useState(false);
   const [showHoverTray, setShowHoverTray] = useState(false);
   const hoverTimeoutRef = useRef(null);
-  const initializedRef = useRef(false);
 
   const queue = useDownloadStore((state) => state.queue);
   const downloading = useDownloadStore((state) => state.downloading);
@@ -26,12 +25,9 @@ export function DownloadQueuePopout() {
   const currentDownload = downloading[0];
   const currentProgress = currentDownload?.progress || 0;
 
+  // Check if downloads are running based on downloading array
   useEffect(() => {
-    if (!initializedRef.current && downloading.length > 0) {
-      initializedRef.current = true;
-      setIsRunning(true);
-      downloadManager.initialize();
-    }
+    setIsRunning(downloading.length > 0 || downloadManager.isProcessing);
   }, [downloading.length]);
 
   const handleStart = async () => {

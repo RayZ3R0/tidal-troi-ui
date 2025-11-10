@@ -11,13 +11,31 @@ class DownloadManager {
     this.isProcessing = false;
     this.activeDownloads = new Map();
     this.progressStreams = new Map();
+    this.initialized = false;
   }
 
   async initialize() {
+    if (this.initialized) {
+      console.log("Download manager already initialized");
+      return;
+    }
+
+    console.log("🔄 Initializing download manager...");
+    this.initialized = true;
+
     const { downloading } = useDownloadStore.getState();
 
+    // Reconnect to all active downloads
     for (const track of downloading) {
+      console.log(`Reconnecting to download: ${track.artist} - ${track.title}`);
       this.reconnectProgressStream(track);
+    }
+
+    // Auto-start if there are queued or downloading items
+    const { queue } = useDownloadStore.getState();
+    if (downloading.length > 0 || queue.length > 0) {
+      console.log("Auto-starting download manager...");
+      setTimeout(() => this.start(), 1000);
     }
   }
 
@@ -25,8 +43,11 @@ class DownloadManager {
     const trackId = track.tidal_id || track.id;
 
     if (this.progressStreams.has(trackId)) {
+      console.log(`Progress stream already exists for track ${trackId}`);
       return;
     }
+
+    console.log(`Creating progress stream for track ${trackId}`);
 
     const authHeader = useAuthStore.getState().getAuthHeader();
     const headers = {};
@@ -37,7 +58,7 @@ class DownloadManager {
     const sseUrl = `${API_BASE}/download/progress/${trackId}`;
 
     let reconnectAttempts = 0;
-    const maxReconnectAttempts = 5;
+    const maxReconnectAttempts = 10; // Increased from 5
     const reconnectDelay = 2000;
 
     const createAuthenticatedSSE = async () => {
@@ -49,6 +70,7 @@ class DownloadManager {
 
         if (response.status === 401) {
           useAuthStore.getState().clearCredentials();
+          console.error("Authentication required");
           return null;
         }
 
@@ -64,6 +86,18 @@ class DownloadManager {
               `Failed to reconnect progress stream for track ${trackId} after ${maxReconnectAttempts} attempts`
             );
             this.progressStreams.delete(trackId);
+
+            // Move to failed if max attempts reached
+            const state = useDownloadStore.getState();
+            const downloadingTrack = state.downloading.find(
+              (t) => t.tidal_id === trackId || t.id === track.id
+            );
+            if (downloadingTrack) {
+              state.failDownload(
+                downloadingTrack.id,
+                "Failed to connect to download progress"
+              );
+            }
           }
           return null;
         }
@@ -76,7 +110,7 @@ class DownloadManager {
           reader: reader,
         });
 
-        reconnectAttempts = 0;
+        reconnectAttempts = 0; // Reset on successful connection
 
         const readStream = async () => {
           try {
@@ -101,6 +135,7 @@ class DownloadManager {
                       .updateProgress(track.id, data.progress);
 
                     if (data.status === "completed" || data.progress >= 100) {
+                      console.log(`Download completed for track ${trackId}`);
                       useDownloadStore
                         .getState()
                         .completeDownload(track.id, track.title);
@@ -115,7 +150,7 @@ class DownloadManager {
                     );
                     const state = useDownloadStore.getState();
                     const downloadingTrack = state.downloading.find(
-                      (t) => t.tidal_id === trackId
+                      (t) => t.tidal_id === trackId || t.id === track.id
                     );
                     if (downloadingTrack) {
                       state.failDownload(
@@ -128,6 +163,7 @@ class DownloadManager {
                   }
 
                   if (data.status === "failed") {
+                    console.error(`Download failed for track ${trackId}`);
                     useDownloadStore
                       .getState()
                       .failDownload(track.id, data.error || "Download failed");
@@ -181,7 +217,10 @@ class DownloadManager {
     this.isProcessing = true;
     console.log("🎵 Download manager started");
 
-    await this.initialize();
+    // Ensure we're initialized
+    if (!this.initialized) {
+      await this.initialize();
+    }
 
     while (this.isProcessing) {
       const state = useDownloadStore.getState();
@@ -191,7 +230,10 @@ class DownloadManager {
         const track = queue[0];
         await this.downloadTrack(track);
       } else if (downloading.length === 0 && queue.length === 0) {
-        await this.sleep(1000);
+        // No more work to do
+        console.log("Queue empty, stopping download manager");
+        this.isProcessing = false;
+        break;
       } else {
         await this.sleep(500);
       }
@@ -201,6 +243,7 @@ class DownloadManager {
   }
 
   stop() {
+    console.log("Stopping download manager...");
     this.isProcessing = false;
     this.activeDownloads.forEach((controller) => {
       if (controller.abort) {
@@ -209,12 +252,13 @@ class DownloadManager {
     });
     this.activeDownloads.clear();
 
-    this.progressStreams.forEach((stream) => {
-      if (stream.cancel) {
-        stream.cancel();
-      }
-    });
-    this.progressStreams.clear();
+    // Don't clear progress streams - let them continue
+    // this.progressStreams.forEach((stream) => {
+    //   if (stream.cancel) {
+    //     stream.cancel();
+    //   }
+    // });
+    // this.progressStreams.clear();
   }
 
   async downloadTrack(track) {
@@ -682,3 +726,11 @@ class DownloadManager {
 }
 
 export const downloadManager = new DownloadManager();
+
+// Auto-initialize on module load
+if (typeof window !== "undefined") {
+  window.addEventListener("load", () => {
+    console.log("Auto-initializing download manager on page load");
+    downloadManager.initialize();
+  });
+}

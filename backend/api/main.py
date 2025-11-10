@@ -1400,6 +1400,40 @@ async def download_track_server_side(
     username: str = Depends(require_auth)
 ):
     try:
+        # Check if download is already in progress
+        if request.track_id in active_downloads:
+            current_status = active_downloads[request.track_id].get('status')
+            if current_status in ['starting', 'downloading', 'transcoding']:
+                log_warning(f"Download already in progress for track {request.track_id}")
+                return {
+                    "status": "downloading",
+                    "filename": "In progress",
+                    "message": "Download already in progress"
+                }
+        
+        # Check download state manager
+        saved_state = download_state_manager.get_download_state(request.track_id)
+        if saved_state:
+            if saved_state['status'] == 'downloading':
+                log_warning(f"Download in state manager for track {request.track_id}")
+                # Re-register in active_downloads
+                active_downloads[request.track_id] = {
+                    'progress': saved_state.get('progress', 0),
+                    'status': 'downloading'
+                }
+                return {
+                    "status": "downloading",
+                    "filename": "In progress",
+                    "message": "Download already in progress"
+                }
+            elif saved_state['status'] == 'completed':
+                log_warning(f"Track {request.track_id} already completed")
+                return {
+                    "status": "exists",
+                    "filename": saved_state.get('metadata', {}).get('title', 'Completed'),
+                    "message": "Download already completed"
+                }
+        
         print(f"\n{'='*60}")
         print(f"Download Request:")
         print(f"  Track ID: {request.track_id}")
@@ -1410,6 +1444,7 @@ async def download_track_server_side(
         
         requested_quality = request.quality.upper() if request.quality else "LOSSLESS"
         
+        # Mark as starting immediately
         active_downloads[request.track_id] = {
             'progress': 0,
             'status': 'starting'
@@ -1450,22 +1485,21 @@ async def download_track_server_side(
             artist_data = track_data.get('artist', {})
             if isinstance(artist_data, dict):
                 metadata['artist'] = artist_data.get('name', request.artist)
+                metadata['musicbrainz_artistid'] = artist_data.get('mixes')
             else:
                 metadata['artist'] = request.artist
             
             album_data = track_data.get('album', {})
             if isinstance(album_data, dict):
                 metadata['album'] = album_data.get('title')
+                metadata['album_artist'] = album_data.get('artist', {}).get('name') if isinstance(album_data.get('artist'), dict) else None
                 metadata['total_tracks'] = album_data.get('numberOfTracks')
-                metadata['date'] = album_data.get('releaseDate', metadata.get('date'))
+                metadata['total_discs'] = album_data.get('numberOfVolumes')
                 
                 cover_id = album_data.get('cover')
                 if cover_id:
-                    metadata['cover_url'] = f"https://resources.tidal.com/images/{cover_id.replace('-', '/')}/1280x1280.jpg"
-                
-                album_artist = album_data.get('artist', {})
-                if isinstance(album_artist, dict):
-                    metadata['album_artist'] = album_artist.get('name')
+                    cover_id_str = str(cover_id).replace('-', '/')
+                    metadata['cover_url'] = f"https://resources.tidal.com/images/{cover_id_str}/640x640.jpg"
         
         log_success(f"Track metadata: {metadata.get('artist')} - {metadata.get('title')}")
         if metadata.get('album'):
@@ -1509,6 +1543,7 @@ async def download_track_server_side(
         if final_filepath.exists():
             log_warning("File already exists, skipping download")
             del active_downloads[request.track_id]
+            download_state_manager.set_completed(request.track_id, final_filename, metadata)
             return {
                 "status": "exists",
                 "filename": final_filename,
@@ -1543,7 +1578,6 @@ async def download_track_server_side(
         raise
     except Exception as e:
         log_error(f"Download error: {e}")
-        import traceback
         traceback.print_exc()
         
         if request.track_id in active_downloads:

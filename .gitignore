@@ -4,6 +4,7 @@ downloads/
 frontend/node_modules/
 tidal-ui-src-reference/
 backend/.env
+backend\download_state.json
 
 # Python
 __pycache__/
